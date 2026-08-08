@@ -1,0 +1,335 @@
+from __future__ import annotations
+
+import csv
+import json
+from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from typing import Any
+
+from .errors import GatewayError
+from .util import canonical_json, load_json_exact, path_within, repository_root, safe_markdown, sha256_bytes, sha256_file
+
+
+CANONICAL_COLUMNS = (
+    "ReportDate", "Tenant", "Section", "AccountID", "AccountName", "AccountCode", "Debit", "Credit", "YTDDebit", "YTDCredit"
+)
+MODEL_PROJECTION = (
+    "evidence_ref", "account_ref", "section", "current_ytd_net", "prior_ytd_net", "delta", "percent_change", "review_reason"
+)
+ALLOWED_DECISIONS = {"ACKNOWLEDGED", "NEEDS_EVIDENCE", "ESCALATED"}
+
+
+@dataclass(frozen=True)
+class BalanceRow:
+    report_date: date
+    tenant: str
+    section: str
+    account_id: str
+    account_name: str
+    account_code: str
+    debit: Decimal
+    credit: Decimal
+    ytd_debit: Decimal
+    ytd_credit: Decimal
+
+    @property
+    def ytd_net(self) -> Decimal:
+        return self.ytd_debit - self.ytd_credit
+
+
+@dataclass(frozen=True)
+class Source:
+    manifest_path: Path
+    manifest: dict[str, Any]
+    csv_path: Path
+    rows: tuple[BalanceRow, ...]
+
+
+def _non_empty(value: Any, *, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise GatewayError(f"{field} must be a non-empty string.")
+    return value.strip()
+
+
+def _decimal(value: Any, *, field: str) -> Decimal:
+    if not isinstance(value, str):
+        raise GatewayError(f"{field} must be a decimal string.")
+    try:
+        result = Decimal(value)
+    except InvalidOperation as exc:
+        raise GatewayError(f"{field} is not a valid decimal.") from exc
+    if not result.is_finite():
+        raise GatewayError(f"{field} must be finite.")
+    return result
+
+
+def _load_tb(path: Path) -> tuple[BalanceRow, ...]:
+    rows: list[BalanceRow] = []
+    seen: set[str] = set()
+    with path.open("r", encoding="utf-8-sig", newline="") as source:
+        reader = csv.DictReader(source)
+        if reader.fieldnames is None or tuple(reader.fieldnames) != CANONICAL_COLUMNS:
+            raise GatewayError("CSV must have exactly the canonical ten-column header in its declared order.")
+        for line, raw in enumerate(reader, start=2):
+            if None in raw:
+                raise GatewayError(f"CSV row {line} has more fields than its header.")
+            try:
+                report_date = date.fromisoformat(_non_empty(raw["ReportDate"], field=f"CSV row {line} ReportDate"))
+            except ValueError as exc:
+                raise GatewayError(f"CSV row {line} ReportDate must be ISO YYYY-MM-DD.") from exc
+            account_id = _non_empty(raw["AccountID"], field=f"CSV row {line} AccountID")
+            if account_id in seen:
+                raise GatewayError(f"CSV has duplicate AccountID {account_id!r}.")
+            seen.add(account_id)
+            row = BalanceRow(
+                report_date=report_date,
+                tenant=_non_empty(raw["Tenant"], field=f"CSV row {line} Tenant"),
+                section=_non_empty(raw["Section"], field=f"CSV row {line} Section"),
+                account_id=account_id,
+                account_name=_non_empty(raw["AccountName"], field=f"CSV row {line} AccountName"),
+                account_code=_non_empty(raw["AccountCode"], field=f"CSV row {line} AccountCode"),
+                debit=_decimal(raw["Debit"], field=f"CSV row {line} Debit"),
+                credit=_decimal(raw["Credit"], field=f"CSV row {line} Credit"),
+                ytd_debit=_decimal(raw["YTDDebit"], field=f"CSV row {line} YTDDebit"),
+                ytd_credit=_decimal(raw["YTDCredit"], field=f"CSV row {line} YTDCredit"),
+            )
+            rows.append(row)
+    if not rows:
+        raise GatewayError("CSV must contain at least one account row.")
+    if len({row.tenant for row in rows}) != 1 or len({row.report_date for row in rows}) != 1:
+        raise GatewayError("CSV must contain exactly one tenant and report date.")
+    zero = Decimal("0")
+    if sum((row.debit for row in rows), zero) != sum((row.credit for row in rows), zero):
+        raise GatewayError("CSV movement debit and credit totals are not exactly balanced.")
+    if sum((row.ytd_debit for row in rows), zero) != sum((row.ytd_credit for row in rows), zero):
+        raise GatewayError("CSV YTD debit and credit totals are not exactly balanced.")
+    return tuple(rows)
+
+
+def _load_manifest(path: Path) -> Source:
+    manifest = load_json_exact(path, {"schema_version", "mode", "source_system", "entity_ref", "report", "export"}, label="source manifest")
+    if manifest["schema_version"] != "xero-source-manifest.v1" or manifest["mode"] != "synthetic":
+        raise GatewayError("Only xero-source-manifest.v1 in synthetic mode is supported.")
+    if manifest["source_system"] != "xero-trial-balance-export":
+        raise GatewayError("Source manifest must declare xero-trial-balance-export.")
+    _non_empty(manifest["entity_ref"], field="entity_ref")
+    report = manifest["report"]
+    export = manifest["export"]
+    if not isinstance(report, dict) or set(report) != {"name", "as_at", "basis", "currency", "tracking_filters", "include_drafts"}:
+        raise GatewayError("source manifest report has an invalid shape.")
+    if not isinstance(export, dict) or set(export) != {"schema", "csv", "sha256", "generated_at"}:
+        raise GatewayError("source manifest export has an invalid shape.")
+    if report["name"] != "Trial Balance" or report["basis"] != "accrual" or report["currency"] != "AUD":
+        raise GatewayError("Only accrual AUD Trial Balance reports are supported in v0.1.")
+    if not isinstance(report["tracking_filters"], list) or not isinstance(report["include_drafts"], bool):
+        raise GatewayError("source manifest report tracking/draft fields are invalid.")
+    try:
+        as_at = date.fromisoformat(_non_empty(report["as_at"], field="report.as_at"))
+    except ValueError as exc:
+        raise GatewayError("report.as_at must be an ISO date.") from exc
+    if export["schema"] != "xero-tb-csv.v1" or not isinstance(export["csv"], str) or not isinstance(export["sha256"], str):
+        raise GatewayError("source manifest export schema, csv, or sha256 is invalid.")
+    root = repository_root()
+    csv_path = path_within(root / export["csv"], root / "samples", label="manifest CSV")
+    actual_hash = sha256_file(csv_path)
+    if actual_hash != export["sha256"].lower():
+        raise GatewayError("manifest CSV SHA-256 does not match the supplied source file.")
+    rows = _load_tb(csv_path)
+    if rows[0].report_date != as_at:
+        raise GatewayError("manifest report.as_at and CSV ReportDate do not match.")
+    return Source(manifest_path=path, manifest=manifest, csv_path=csv_path, rows=rows)
+
+
+def _load_context(path: Path) -> tuple[Source, Source, dict[str, Any]]:
+    context = load_json_exact(path, {"schema_version", "mode", "current_manifest", "prior_manifest"}, label="review context")
+    if context["schema_version"] != "xero-review-context.v1" or context["mode"] != "synthetic":
+        raise GatewayError("Only xero-review-context.v1 in synthetic mode is supported.")
+    root = repository_root()
+    current_path = path_within(root / _non_empty(context["current_manifest"], field="current_manifest"), root / "samples", label="current manifest")
+    prior_path = path_within(root / _non_empty(context["prior_manifest"], field="prior_manifest"), root / "samples", label="prior manifest")
+    current, prior = _load_manifest(current_path), _load_manifest(prior_path)
+    current_report, prior_report = current.manifest["report"], prior.manifest["report"]
+    for field in ("basis", "currency", "tracking_filters", "include_drafts"):
+        if current_report[field] != prior_report[field]:
+            raise GatewayError(f"Current/prior source context mismatch for {field}.")
+    if current.manifest["entity_ref"] != prior.manifest["entity_ref"]:
+        raise GatewayError("Current/prior source context has different entity_ref values.")
+    if prior.rows[0].report_date >= current.rows[0].report_date:
+        raise GatewayError("Prior report date must be earlier than the current report date.")
+    return current, prior, context
+
+
+def _load_policy(path: Path) -> dict[str, Any]:
+    policy = load_json_exact(path, {"schema_version", "policy_id", "operations", "model_projection"}, label="policy")
+    if policy["schema_version"] != "xero-review-policy.v1" or tuple(policy["model_projection"]) != MODEL_PROJECTION:
+        raise GatewayError("Policy schema or model projection is unsupported.")
+    operations = policy["operations"]
+    if not isinstance(operations, dict) or set(operations) != {"trial_balance_variance"}:
+        raise GatewayError("Policy must contain only the trial_balance_variance operation.")
+    operation = operations["trial_balance_variance"]
+    if not isinstance(operation, dict) or set(operation) != {"allowed_sections", "minimum_absolute_delta", "minimum_percent_delta", "max_results"}:
+        raise GatewayError("Policy operation has an invalid shape.")
+    if not isinstance(operation["allowed_sections"], list) or not all(isinstance(value, str) for value in operation["allowed_sections"]):
+        raise GatewayError("Policy allowed_sections must be a list of strings.")
+    if not isinstance(operation["max_results"], int) or not 1 <= operation["max_results"] <= 100:
+        raise GatewayError("Policy max_results must be an integer from 1 to 100.")
+    for field in ("minimum_absolute_delta", "minimum_percent_delta"):
+        if _decimal(operation[field], field=field) < 0:
+            raise GatewayError(f"Policy {field} cannot be negative.")
+    return policy
+
+
+def _load_request(path: Path, policy: dict[str, Any]) -> dict[str, Any]:
+    request = load_json_exact(path, {"schema_version", "request_id", "operation", "section", "policy_id"}, label="review request")
+    if request["schema_version"] != "xero-review-request.v1" or request["operation"] != "trial_balance_variance":
+        raise GatewayError("Only the trial_balance_variance request is supported.")
+    if request["policy_id"] != policy["policy_id"]:
+        raise GatewayError("Request policy_id does not match the selected policy.")
+    allowed_sections = policy["operations"]["trial_balance_variance"]["allowed_sections"]
+    if request["section"] not in allowed_sections:
+        raise GatewayError("Request section is not allowlisted by policy.")
+    _non_empty(request["request_id"], field="request_id")
+    return request
+
+
+def _decimal_string(value: Decimal) -> str:
+    return format(value, "f")
+
+
+def evaluate(*, context_path: Path, request_path: Path, policy_path: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Evaluate the one fixed, read-only synthetic operation without network or ledger access."""
+    root = repository_root()
+    context_path = path_within(context_path, root / "samples", label="context")
+    request_path = path_within(request_path, root / "samples", label="request")
+    policy_path = path_within(policy_path, root / "policy", label="policy")
+    policy = _load_policy(policy_path)
+    request = _load_request(request_path, policy)
+    current, prior, context = _load_context(context_path)
+    operation = policy["operations"]["trial_balance_variance"]
+    absolute = _decimal(operation["minimum_absolute_delta"], field="minimum_absolute_delta")
+    minimum_percent = _decimal(operation["minimum_percent_delta"], field="minimum_percent_delta") / Decimal("100")
+    prior_by_id = {row.account_id: row for row in prior.rows}
+    findings: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for current_row in sorted(current.rows, key=lambda row: row.account_id):
+        prior_row = prior_by_id.get(current_row.account_id)
+        if prior_row is None or current_row.section != request["section"]:
+            continue
+        delta = current_row.ytd_net - prior_row.ytd_net
+        if prior_row.ytd_net == 0:
+            percent = None
+        else:
+            percent = abs(delta / prior_row.ytd_net)
+        if delta == 0 or abs(delta) < absolute or (percent is not None and percent < minimum_percent):
+            continue
+        account_ref = "acct:" + sha256_bytes(f"{current.manifest['entity_ref']}:{current_row.account_id}".encode("utf-8"))[:24]
+        finding_id = "finding:" + sha256_bytes(f"{account_ref}:{delta}:{current.rows[0].report_date}".encode("utf-8"))[:24]
+        evidence_ref = "evidence:" + sha256_bytes(f"{finding_id}:reviewer-evidence".encode("utf-8"))[:24]
+        model_item = {
+            "finding_id": finding_id,
+            "evidence_ref": evidence_ref,
+            "account_ref": account_ref,
+            "section": current_row.section,
+            "current_ytd_net": _decimal_string(current_row.ytd_net),
+            "prior_ytd_net": _decimal_string(prior_row.ytd_net),
+            "delta": _decimal_string(delta),
+            "percent_change": None if percent is None else _decimal_string(percent),
+            "review_reason": "Movement exceeds the approved variance thresholds.",
+        }
+        evidence_item = {
+            "finding_id": finding_id,
+            "account_id": current_row.account_id,
+            "account_code": current_row.account_code,
+            "account_name": current_row.account_name,
+            "current_values": {"debit": _decimal_string(current_row.debit), "credit": _decimal_string(current_row.credit), "ytd_debit": _decimal_string(current_row.ytd_debit), "ytd_credit": _decimal_string(current_row.ytd_credit)},
+            "prior_values": {"debit": _decimal_string(prior_row.debit), "credit": _decimal_string(prior_row.credit), "ytd_debit": _decimal_string(prior_row.ytd_debit), "ytd_credit": _decimal_string(prior_row.ytd_credit)},
+            "source_refs": ["source:current", "source:prior"],
+        }
+        findings.append((model_item, evidence_item))
+    findings = findings[: operation["max_results"]]
+    run_seed = {
+        "context_sha256": sha256_file(context_path),
+        "request_sha256": sha256_file(request_path),
+        "policy_sha256": sha256_file(policy_path),
+        "current_csv_sha256": sha256_file(current.csv_path),
+        "prior_csv_sha256": sha256_file(prior.csv_path),
+    }
+    run_id = "sha256:" + sha256_bytes(canonical_json(run_seed))
+    model = {
+        "schema_version": "xero-model-review-result.v1",
+        "run_id": run_id,
+        "mode": "synthetic",
+        "status": "REVIEW_READY",
+        "operation": request["operation"],
+        "findings": [item[0] for item in findings],
+        "limitations": [
+            "This is a synthetic-data review result.",
+            "No journal, payment, filing, or period-locking action is available.",
+            "A human reviewer must assess each finding against source evidence.",
+        ],
+    }
+    evidence = {
+        "schema_version": "xero-reviewer-evidence.v1",
+        "run_id": run_id,
+        "mode": "synthetic",
+        "items": [item[1] for item in findings],
+    }
+    receipt = {
+        "schema_version": "xero-review-receipt.v1",
+        "run_id": run_id,
+        "mode": "synthetic",
+        "policy_sha256": "sha256:" + run_seed["policy_sha256"],
+        "request_sha256": "sha256:" + run_seed["request_sha256"],
+        "source_digests": {"current": "sha256:" + run_seed["current_csv_sha256"], "prior": "sha256:" + run_seed["prior_csv_sha256"]},
+        "result_sha256": "sha256:" + sha256_bytes(canonical_json(model)),
+        "code_version": "0.1.0",
+    }
+    _assert_model_is_redacted(model, current.rows)
+    return model, evidence, receipt
+
+
+def _assert_model_is_redacted(model: dict[str, Any], rows: tuple[BalanceRow, ...]) -> None:
+    serialised = json.dumps(model, sort_keys=True)
+    forbidden = {row.tenant for row in rows} | {row.account_name for row in rows} | {row.account_id for row in rows}
+    if any(value in serialised for value in forbidden):
+        raise GatewayError("Internal disclosure assertion failed: model result contains raw source display data.")
+    if '"account_code"' in serialised or '"account_name"' in serialised or '"tenant"' in serialised:
+        raise GatewayError("Internal disclosure assertion failed: model result contains a prohibited source field.")
+
+
+def validate_review(*, evidence_path: Path, receipt_path: Path, decision_path: Path) -> dict[str, Any]:
+    root = repository_root()
+    evidence_path = path_within(evidence_path, root / "build", label="reviewer evidence")
+    receipt_path = path_within(receipt_path, root / "build", label="receipt")
+    decision_path = path_within(decision_path, root / "samples", label="human decision")
+    evidence = load_json_exact(evidence_path, {"schema_version", "run_id", "mode", "items"}, label="reviewer evidence")
+    receipt = load_json_exact(receipt_path, {"schema_version", "run_id", "mode", "policy_sha256", "request_sha256", "source_digests", "result_sha256", "code_version"}, label="receipt")
+    decision = load_json_exact(decision_path, {"schema_version", "run_id", "reviewer_ref", "reviewed_at", "decisions"}, label="human decision")
+    if evidence["schema_version"] != "xero-reviewer-evidence.v1" or receipt["schema_version"] != "xero-review-receipt.v1" or decision["schema_version"] != "xero-human-review-decision.v1":
+        raise GatewayError("A supplied review artefact has an unsupported schema version.")
+    if not (evidence["run_id"] == receipt["run_id"] == decision["run_id"]):
+        raise GatewayError("Decision, evidence, and receipt must refer to the same run_id.")
+    if not isinstance(decision["decisions"], list) or not decision["decisions"]:
+        raise GatewayError("Human decision must contain at least one decision.")
+    known = {item["finding_id"] for item in evidence["items"]}
+    decided: set[str] = set()
+    for item in decision["decisions"]:
+        if not isinstance(item, dict) or set(item) != {"finding_id", "decision", "rationale"}:
+            raise GatewayError("Each human decision must contain exactly finding_id, decision, and rationale.")
+        if item["finding_id"] not in known or item["finding_id"] in decided:
+            raise GatewayError("Human decision refers to an unknown or duplicate finding.")
+        if item["decision"] not in ALLOWED_DECISIONS or not isinstance(item["rationale"], str) or not item["rationale"].strip():
+            raise GatewayError("Human decision state or rationale is invalid.")
+        decided.add(item["finding_id"])
+    return {"schema_version": "xero-review-decision-validation.v1", "run_id": receipt["run_id"], "status": "DECISION_RECORDED", "decision_count": len(decided), "limitation": "Validation records a structurally valid human decision; it does not approve, resolve, post, pay, lodge, or lock anything."}
+
+
+def write_evaluation(model: dict[str, Any], evidence: dict[str, Any], receipt: dict[str, Any], output_dir: Path) -> dict[str, Path]:
+    root = repository_root()
+    output_dir = path_within(output_dir, root / "build", label="output directory", require_exists=False)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    paths = {"model": output_dir / "model-result.json", "evidence": output_dir / "reviewer-evidence.json", "receipt": output_dir / "receipt.json"}
+    for key, payload in (("model", model), ("evidence", evidence), ("receipt", receipt)):
+        paths[key].write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return paths

@@ -1,0 +1,13 @@
+{
+  "schema_version": "xero-human-review-decision.v1",
+  "run_id": "sha256:d1e4b7c9b8eef0a2ee03610c0b27f741345d2b5c941990eb5cca0f60fbf94c86",
+  "reviewer_ref": "demo-reviewer",
+  "reviewed_at": "2026-08-08T00:00:00Z",
+  "decisions": [
+    {
+      "finding_id": "finding:92997a94894d226b9d66ada9",
+      "decision": "ACKNOWLEDGED",
+      "rationale": "Fabricated demo variance reviewed against the fixture evidence."
+    }
+  ]
+}

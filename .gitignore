@@ -1,0 +1,12 @@
+# The demo contains fabricated data only. Never add a client export, token, or review output.
+build/
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+*.csv
+!samples/inputs/*.csv
+.env
+.env.*
+*.token
+*.pem
