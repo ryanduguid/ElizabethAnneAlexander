@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import GatewayError
-from .util import canonical_json, load_json_exact, path_within, repository_root, safe_markdown, sha256_bytes, sha256_file
+from .util import canonical_json, load_json_exact, path_within, repository_root, sha256_bytes, sha256_file
 
 
 CANONICAL_COLUMNS = (
@@ -142,7 +142,7 @@ def _load_manifest(path: Path) -> Source:
     return Source(manifest_path=path, manifest=manifest, csv_path=csv_path, rows=rows)
 
 
-def _load_context(path: Path) -> tuple[Source, Source, dict[str, Any]]:
+def _load_context(path: Path) -> tuple[Source, Source]:
     context = load_json_exact(path, {"schema_version", "mode", "current_manifest", "prior_manifest"}, label="review context")
     if context["schema_version"] != "xero-review-context.v1" or context["mode"] != "synthetic":
         raise GatewayError("Only xero-review-context.v1 in synthetic mode is supported.")
@@ -158,7 +158,7 @@ def _load_context(path: Path) -> tuple[Source, Source, dict[str, Any]]:
         raise GatewayError("Current/prior source context has different entity_ref values.")
     if prior.rows[0].report_date >= current.rows[0].report_date:
         raise GatewayError("Prior report date must be earlier than the current report date.")
-    return current, prior, context
+    return current, prior
 
 
 def _load_policy(path: Path) -> dict[str, Any]:
@@ -206,7 +206,7 @@ def evaluate(*, context_path: Path, request_path: Path, policy_path: Path) -> tu
     policy_path = path_within(policy_path, root / "policy", label="policy")
     policy = _load_policy(policy_path)
     request = _load_request(request_path, policy)
-    current, prior, context = _load_context(context_path)
+    current, prior = _load_context(context_path)
     operation = policy["operations"]["trial_balance_variance"]
     absolute = _decimal(operation["minimum_absolute_delta"], field="minimum_absolute_delta")
     minimum_percent = _decimal(operation["minimum_percent_delta"], field="minimum_percent_delta") / Decimal("100")
