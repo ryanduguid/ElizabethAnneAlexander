@@ -1,15 +1,39 @@
 from __future__ import annotations
 
 import json
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from xero_ai_review_gateway.errors import GatewayError
-from xero_ai_review_gateway.gateway import _load_tb, evaluate, validate_review, write_evaluation
+from xero_ai_review_gateway.gateway import BalanceRow, _load_tb, _variance_findings, evaluate, validate_review, write_evaluation
 from xero_ai_review_gateway.util import package_root
 
 PKG = Path(__file__).resolve().parents[1] / "xero_ai_review_gateway"
+
+OPERATION = {
+    "allowed_sections": ["Revenue"],
+    "minimum_absolute_delta": "1000.00",
+    "minimum_percent_delta": "15.00",
+    "max_results": 25,
+}
+
+
+def _row(account_id: str, *, section: str = "Revenue", ytd_credit: str = "0.00") -> BalanceRow:
+    return BalanceRow(
+        report_date=date(2026, 6, 30),
+        tenant="Unit Test Tenant",
+        section=section,
+        account_id=account_id,
+        account_name=f"Name {account_id}",
+        account_code="9999",
+        debit=Decimal("0.00"),
+        credit=Decimal("0.00"),
+        ytd_debit=Decimal("0.00"),
+        ytd_credit=Decimal(ytd_credit),
+    )
 
 
 def _evaluate():
@@ -85,6 +109,52 @@ def test_evaluation_output_outside_cwd_build_is_blocked(tmp_path: Path, monkeypa
 
     with pytest.raises(GatewayError, match="output directory must stay within"):
         write_evaluation(model, evidence, receipt, tmp_path / "elsewhere")
+
+
+def test_account_present_only_in_the_current_period_is_reported() -> None:
+    current = (_row("acct-1", ytd_credit="18500.00"), _row("acct-new", ytd_credit="5000.00"))
+    prior = (_row("acct-1", ytd_credit="18000.00"),)
+
+    findings = _variance_findings(current, prior, entity_ref="entity-1", section="Revenue", operation=OPERATION)
+
+    assert len(findings) == 1
+    model_item, evidence_item = findings[0]
+    assert model_item["prior_ytd_net"] == "0"
+    assert model_item["delta"] == "-5000.00"
+    assert model_item["percent_change"] is None
+    assert "new in the current period" in model_item["review_reason"]
+    assert evidence_item["account_id"] == "acct-new"
+    assert evidence_item["prior_values"] is None
+    assert evidence_item["current_values"] is not None
+    assert evidence_item["source_refs"] == ["source:current"]
+
+
+def test_account_present_only_in_the_prior_period_is_reported() -> None:
+    current = (_row("acct-1", ytd_credit="18000.00"),)
+    prior = (_row("acct-1", ytd_credit="18000.00"), _row("acct-gone", ytd_credit="9000.00"))
+
+    findings = _variance_findings(current, prior, entity_ref="entity-1", section="Revenue", operation=OPERATION)
+
+    assert len(findings) == 1
+    model_item, evidence_item = findings[0]
+    assert model_item["current_ytd_net"] == "0"
+    assert model_item["prior_ytd_net"] == "-9000.00"
+    assert model_item["delta"] == "9000.00"
+    assert model_item["percent_change"] == "100.0000"
+    assert "only in the prior period" in model_item["review_reason"]
+    assert evidence_item["account_id"] == "acct-gone"
+    assert evidence_item["current_values"] is None
+    assert evidence_item["prior_values"] is not None
+    assert evidence_item["source_refs"] == ["source:prior"]
+
+
+def test_one_sided_account_outside_the_requested_section_is_not_reported() -> None:
+    current = (_row("acct-1", ytd_credit="18000.00"), _row("acct-asset", section="Assets", ytd_credit="7000.00"))
+    prior = (_row("acct-1", ytd_credit="18000.00"),)
+
+    findings = _variance_findings(current, prior, entity_ref="entity-1", section="Revenue", operation=OPERATION)
+
+    assert findings == []
 
 
 def test_unbalanced_source_fails_closed(tmp_path: Path) -> None:

@@ -228,6 +228,81 @@ def _percent_string(ratio: Decimal) -> str:
     return _decimal_string((ratio * Decimal("100")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
 
 
+def _row_values(row: BalanceRow | None) -> dict[str, str] | None:
+    if row is None:
+        return None
+    return {
+        "debit": _decimal_string(row.debit),
+        "credit": _decimal_string(row.credit),
+        "ytd_debit": _decimal_string(row.ytd_debit),
+        "ytd_credit": _decimal_string(row.ytd_credit),
+    }
+
+
+def _variance_findings(
+    current_rows: tuple[BalanceRow, ...],
+    prior_rows: tuple[BalanceRow, ...],
+    *,
+    entity_ref: str,
+    section: str,
+    operation: dict[str, Any],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Compare every account seen in either period, so one-sided accounts cannot hide."""
+    absolute = _decimal(operation["minimum_absolute_delta"], field="minimum_absolute_delta")
+    minimum_percent = _decimal(operation["minimum_percent_delta"], field="minimum_percent_delta") / Decimal("100")
+    current_by_id = {row.account_id: row for row in current_rows}
+    prior_by_id = {row.account_id: row for row in prior_rows}
+    report_date = current_rows[0].report_date
+    findings: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for account_id in sorted(set(current_by_id) | set(prior_by_id)):
+        current_row = current_by_id.get(account_id)
+        prior_row = prior_by_id.get(account_id)
+        # account_id came from one of the two maps, so at least one row exists.
+        row = current_row if current_row is not None else prior_row
+        if row is None or row.section != section:
+            continue
+        current_net = current_row.ytd_net if current_row is not None else Decimal("0")
+        prior_net = prior_row.ytd_net if prior_row is not None else Decimal("0")
+        delta = current_net - prior_net
+        if prior_row is None or prior_net == 0:
+            percent = None
+        else:
+            percent = abs(delta / prior_net)
+        if delta == 0 or abs(delta) < absolute or (percent is not None and percent < minimum_percent):
+            continue
+        if current_row is None:
+            reason = "Account exists only in the prior period; its balance movement exceeds the approved variance thresholds."
+        elif prior_row is None:
+            reason = "Account is new in the current period; its balance movement exceeds the approved variance thresholds."
+        else:
+            reason = "Movement exceeds the approved variance thresholds."
+        account_ref = "acct:" + sha256_bytes(f"{entity_ref}:{account_id}".encode("utf-8"))[:24]
+        finding_id = "finding:" + sha256_bytes(f"{account_ref}:{delta}:{report_date}".encode("utf-8"))[:24]
+        evidence_ref = "evidence:" + sha256_bytes(f"{finding_id}:reviewer-evidence".encode("utf-8"))[:24]
+        model_item = {
+            "finding_id": finding_id,
+            "evidence_ref": evidence_ref,
+            "account_ref": account_ref,
+            "section": row.section,
+            "current_ytd_net": _decimal_string(current_net),
+            "prior_ytd_net": _decimal_string(prior_net),
+            "delta": _decimal_string(delta),
+            "percent_change": None if percent is None else _percent_string(percent),
+            "review_reason": reason,
+        }
+        evidence_item = {
+            "finding_id": finding_id,
+            "account_id": account_id,
+            "account_code": row.account_code,
+            "account_name": row.account_name,
+            "current_values": _row_values(current_row),
+            "prior_values": _row_values(prior_row),
+            "source_refs": [ref for ref, present in (("source:current", current_row), ("source:prior", prior_row)) if present is not None],
+        }
+        findings.append((model_item, evidence_item))
+    return findings
+
+
 def evaluate(*, context_path: Path, request_path: Path, policy_path: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Evaluate the one fixed, read-only synthetic operation without network or ledger access."""
     context_path = _resolve_bundled(context_path, "samples", label="context")
@@ -237,45 +312,13 @@ def evaluate(*, context_path: Path, request_path: Path, policy_path: Path) -> tu
     request = _load_request(request_path, policy)
     current, prior = _load_context(context_path)
     operation = policy["operations"]["trial_balance_variance"]
-    absolute = _decimal(operation["minimum_absolute_delta"], field="minimum_absolute_delta")
-    minimum_percent = _decimal(operation["minimum_percent_delta"], field="minimum_percent_delta") / Decimal("100")
-    prior_by_id = {row.account_id: row for row in prior.rows}
-    findings: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for current_row in sorted(current.rows, key=lambda row: row.account_id):
-        prior_row = prior_by_id.get(current_row.account_id)
-        if prior_row is None or current_row.section != request["section"]:
-            continue
-        delta = current_row.ytd_net - prior_row.ytd_net
-        if prior_row.ytd_net == 0:
-            percent = None
-        else:
-            percent = abs(delta / prior_row.ytd_net)
-        if delta == 0 or abs(delta) < absolute or (percent is not None and percent < minimum_percent):
-            continue
-        account_ref = "acct:" + sha256_bytes(f"{current.manifest['entity_ref']}:{current_row.account_id}".encode("utf-8"))[:24]
-        finding_id = "finding:" + sha256_bytes(f"{account_ref}:{delta}:{current.rows[0].report_date}".encode("utf-8"))[:24]
-        evidence_ref = "evidence:" + sha256_bytes(f"{finding_id}:reviewer-evidence".encode("utf-8"))[:24]
-        model_item = {
-            "finding_id": finding_id,
-            "evidence_ref": evidence_ref,
-            "account_ref": account_ref,
-            "section": current_row.section,
-            "current_ytd_net": _decimal_string(current_row.ytd_net),
-            "prior_ytd_net": _decimal_string(prior_row.ytd_net),
-            "delta": _decimal_string(delta),
-            "percent_change": None if percent is None else _percent_string(percent),
-            "review_reason": "Movement exceeds the approved variance thresholds.",
-        }
-        evidence_item = {
-            "finding_id": finding_id,
-            "account_id": current_row.account_id,
-            "account_code": current_row.account_code,
-            "account_name": current_row.account_name,
-            "current_values": {"debit": _decimal_string(current_row.debit), "credit": _decimal_string(current_row.credit), "ytd_debit": _decimal_string(current_row.ytd_debit), "ytd_credit": _decimal_string(current_row.ytd_credit)},
-            "prior_values": {"debit": _decimal_string(prior_row.debit), "credit": _decimal_string(prior_row.credit), "ytd_debit": _decimal_string(prior_row.ytd_debit), "ytd_credit": _decimal_string(prior_row.ytd_credit)},
-            "source_refs": ["source:current", "source:prior"],
-        }
-        findings.append((model_item, evidence_item))
+    findings = _variance_findings(
+        current.rows,
+        prior.rows,
+        entity_ref=current.manifest["entity_ref"],
+        section=request["section"],
+        operation=operation,
+    )
     findings = findings[: operation["max_results"]]
     run_seed = {
         "context_sha256": sha256_file(context_path),
@@ -314,7 +357,7 @@ def evaluate(*, context_path: Path, request_path: Path, policy_path: Path) -> tu
         "result_sha256": "sha256:" + sha256_bytes(canonical_json(model)),
         "code_version": "0.1.0",
     }
-    _assert_model_is_redacted(model, current.rows)
+    _assert_model_is_redacted(model, current.rows + prior.rows)
     return model, evidence, receipt
 
 
