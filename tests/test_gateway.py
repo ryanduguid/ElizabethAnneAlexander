@@ -242,6 +242,54 @@ def test_unbalanced_source_fails_closed(tmp_path: Path) -> None:
         _load_tb(bad)
 
 
+def test_empty_report_date_is_reported_as_empty_not_bad_iso(tmp_path: Path) -> None:
+    bad = tmp_path / "bad.csv"
+    source = (PKG / "samples" / "inputs" / "sample-tb-2026-06-30.csv").read_text(encoding="utf-8")
+    bad.write_text(source.replace("2026-06-30,Demo Entity Pty Ltd,Assets,acct-100", ",Demo Entity Pty Ltd,Assets,acct-100", 1), encoding="utf-8")
+
+    with pytest.raises(GatewayError, match="ReportDate must be a non-empty string"):
+        _load_tb(bad)
+
+
+def test_malformed_evidence_items_are_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from xero_ai_review_gateway.util import canonical_json, sha256_bytes
+
+    monkeypatch.chdir(tmp_path)
+    build = tmp_path / "build"
+    build.mkdir()
+    evidence = {
+        "schema_version": "xero-reviewer-evidence.v1",
+        "run_id": "sha256:unit-test",
+        "mode": "synthetic",
+        "items": ["not-a-dict"],
+        "total_findings": 1,
+        "truncated": False,
+    }
+    receipt = {
+        "schema_version": "xero-review-receipt.v1",
+        "run_id": "sha256:unit-test",
+        "mode": "synthetic",
+        "policy_sha256": "sha256:0",
+        "request_sha256": "sha256:0",
+        "source_digests": {},
+        "result_sha256": "sha256:0",
+        "evidence_sha256": "sha256:" + sha256_bytes(canonical_json(evidence)),
+        "code_version": "0.1.0",
+    }
+    decision = {
+        "schema_version": "xero-human-review-decision.v1",
+        "run_id": "sha256:unit-test",
+        "reviewer_ref": "unit-test-reviewer",
+        "reviewed_at": "2026-08-09T00:00:00Z",
+        "decisions": [{"finding_id": "x", "decision": "ACKNOWLEDGED", "rationale": "r"}],
+    }
+    for name, payload in (("evidence", evidence), ("receipt", receipt), ("decision", decision)):
+        (build / f"{name}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(GatewayError, match="evidence items"):
+        validate_review(evidence_path=build / "evidence.json", receipt_path=build / "receipt.json", decision_path=build / "decision.json")
+
+
 def test_unknown_section_is_denied_by_policy(tmp_path: Path) -> None:
     model, _, _ = _evaluate()
     request = json.loads((PKG / "samples" / "requests" / "sample-revenue-variance.request.json").read_text(encoding="utf-8"))

@@ -100,8 +100,9 @@ def _load_tb(path: Path) -> tuple[BalanceRow, ...]:
         for line, raw in enumerate(reader, start=2):
             if None in raw:
                 raise GatewayError(f"CSV row {line} has more fields than its header.")
+            report_date_text = _non_empty(raw["ReportDate"], field=f"CSV row {line} ReportDate")
             try:
-                report_date = date.fromisoformat(_non_empty(raw["ReportDate"], field=f"CSV row {line} ReportDate"))
+                report_date = date.fromisoformat(report_date_text)
             except ValueError as exc:
                 raise GatewayError(f"CSV row {line} ReportDate must be ISO YYYY-MM-DD.") from exc
             account_id = _non_empty(raw["AccountID"], field=f"CSV row {line} AccountID")
@@ -150,8 +151,9 @@ def _load_manifest(path: Path) -> Source:
         raise GatewayError("Only accrual AUD Trial Balance reports are supported in v0.1.")
     if not isinstance(report["tracking_filters"], list) or not isinstance(report["include_drafts"], bool):
         raise GatewayError("source manifest report tracking/draft fields are invalid.")
+    as_at_text = _non_empty(report["as_at"], field="report.as_at")
     try:
-        as_at = date.fromisoformat(_non_empty(report["as_at"], field="report.as_at"))
+        as_at = date.fromisoformat(as_at_text)
     except ValueError as exc:
         raise GatewayError("report.as_at must be an ISO date.") from exc
     if export["schema"] != "xero-tb-csv.v1" or not isinstance(export["csv"], str) or not isinstance(export["sha256"], str):
@@ -404,9 +406,12 @@ def validate_review(*, evidence_path: Path, receipt_path: Path, decision_path: P
         raise GatewayError("Decision, evidence, and receipt must refer to the same run_id.")
     if "sha256:" + sha256_bytes(canonical_json(evidence)) != receipt["evidence_sha256"]:
         raise GatewayError("Reviewer evidence does not match the receipt's evidence digest.")
+    items = evidence["items"]
+    if not isinstance(items, list) or not all(isinstance(item, dict) and "finding_id" in item for item in items):
+        raise GatewayError("Reviewer evidence items must be a list of objects that each carry a finding_id.")
     if not isinstance(decision["decisions"], list) or not decision["decisions"]:
         raise GatewayError("Human decision must contain at least one decision.")
-    known = {item["finding_id"] for item in evidence["items"]}
+    known = {item["finding_id"] for item in items}
     decided: set[str] = set()
     for item in decision["decisions"]:
         if not isinstance(item, dict) or set(item) != {"finding_id", "decision", "rationale"}:

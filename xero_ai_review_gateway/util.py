@@ -40,6 +40,10 @@ def load_json_exact(path: Path, required: set[str], *, label: str) -> dict[str, 
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise GatewayError(f"{label} does not exist: {path}.") from exc
+    except UnicodeDecodeError as exc:
+        raise GatewayError(f"{label} is not valid UTF-8 text: {path}.") from exc
+    except OSError as exc:
+        raise GatewayError(f"{label} cannot be read: {path}.") from exc
     except json.JSONDecodeError as exc:
         raise GatewayError(f"{label} is not valid JSON: {path}.") from exc
     if not isinstance(raw, dict) or set(raw) != required:
