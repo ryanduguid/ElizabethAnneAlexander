@@ -81,6 +81,57 @@ def test_evaluation_writes_only_below_cwd_build_and_decision_can_be_validated(tm
         decision_path=Path("samples/decisions/sample-review-decision.json"),
     )
     assert result["status"] == "DECISION_RECORDED"
+    assert result["undecided_count"] == 0
+
+
+def test_tampered_evidence_fails_the_receipt_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    model, evidence, receipt = _evaluate()
+    paths = write_evaluation(model, evidence, receipt, Path("build") / "run")
+    tampered = json.loads(paths["evidence"].read_text(encoding="utf-8"))
+    tampered["items"][0]["account_name"] = "Someone Else Entirely"
+    paths["evidence"].write_text(json.dumps(tampered, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(GatewayError, match="evidence digest"):
+        validate_review(
+            evidence_path=paths["evidence"],
+            receipt_path=paths["receipt"],
+            decision_path=Path("samples/decisions/sample-review-decision.json"),
+        )
+
+
+def test_partially_decided_findings_are_counted_as_undecided(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from xero_ai_review_gateway import gateway
+
+    real = gateway._variance_findings
+
+    def doubled(*args, **kwargs):
+        model_item, evidence_item = real(*args, **kwargs)[0]
+        return [
+            (dict(model_item, finding_id=f"finding:clone-{index}"), dict(evidence_item, finding_id=f"finding:clone-{index}"))
+            for index in range(2)
+        ]
+
+    monkeypatch.setattr(gateway, "_variance_findings", doubled)
+    monkeypatch.chdir(tmp_path)
+    model, evidence, receipt = _evaluate()
+    paths = write_evaluation(model, evidence, receipt, Path("build") / "run")
+    decision = {
+        "schema_version": "xero-human-review-decision.v1",
+        "run_id": receipt["run_id"],
+        "reviewer_ref": "unit-test-reviewer",
+        "reviewed_at": "2026-08-09T00:00:00Z",
+        "decisions": [
+            {"finding_id": "finding:clone-0", "decision": "ACKNOWLEDGED", "rationale": "First finding reviewed."}
+        ],
+    }
+    decision_path = tmp_path / "build" / "run" / "decision.json"
+    decision_path.write_text(json.dumps(decision, indent=2) + "\n", encoding="utf-8")
+
+    result = validate_review(evidence_path=paths["evidence"], receipt_path=paths["receipt"], decision_path=decision_path)
+    assert result["status"] == "DECISION_RECORDED"
+    assert result["decision_count"] == 1
+    assert result["undecided_count"] == 1
 
 
 def test_decision_file_is_accepted_from_cwd_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

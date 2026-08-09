@@ -41,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
             out = path_within(args.out, build_root(), label="validation output", require_exists=False)
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(json.dumps(validation, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        print(f"xero-ai-review-gateway: {validation['status']}; {validation['decision_count']} decision(s)")
+        print(f"xero-ai-review-gateway: {validation['status']}; {validation['decision_count']} decision(s); {validation['undecided_count']} undecided finding(s)")
         return 0
     except GatewayError as exc:
         print(f"xero-ai-review-gateway: blocked: {exc}", file=sys.stderr)

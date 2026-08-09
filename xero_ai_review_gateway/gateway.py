@@ -361,6 +361,7 @@ def evaluate(*, context_path: Path, request_path: Path, policy_path: Path) -> tu
         "request_sha256": "sha256:" + run_seed["request_sha256"],
         "source_digests": {"current": "sha256:" + run_seed["current_csv_sha256"], "prior": "sha256:" + run_seed["prior_csv_sha256"]},
         "result_sha256": "sha256:" + sha256_bytes(canonical_json(model)),
+        "evidence_sha256": "sha256:" + sha256_bytes(canonical_json(evidence)),
         "code_version": "0.1.0",
     }
     _assert_model_is_redacted(model, current.rows + prior.rows)
@@ -381,12 +382,14 @@ def validate_review(*, evidence_path: Path, receipt_path: Path, decision_path: P
     receipt_path = path_within(receipt_path, build_root(), label="receipt")
     decision_path = _resolve_decision(decision_path)
     evidence = load_json_exact(evidence_path, {"schema_version", "run_id", "mode", "items", "total_findings", "truncated"}, label="reviewer evidence")
-    receipt = load_json_exact(receipt_path, {"schema_version", "run_id", "mode", "policy_sha256", "request_sha256", "source_digests", "result_sha256", "code_version"}, label="receipt")
+    receipt = load_json_exact(receipt_path, {"schema_version", "run_id", "mode", "policy_sha256", "request_sha256", "source_digests", "result_sha256", "evidence_sha256", "code_version"}, label="receipt")
     decision = load_json_exact(decision_path, {"schema_version", "run_id", "reviewer_ref", "reviewed_at", "decisions"}, label="human decision")
     if evidence["schema_version"] != "xero-reviewer-evidence.v1" or receipt["schema_version"] != "xero-review-receipt.v1" or decision["schema_version"] != "xero-human-review-decision.v1":
         raise GatewayError("A supplied review artefact has an unsupported schema version.")
     if not (evidence["run_id"] == receipt["run_id"] == decision["run_id"]):
         raise GatewayError("Decision, evidence, and receipt must refer to the same run_id.")
+    if "sha256:" + sha256_bytes(canonical_json(evidence)) != receipt["evidence_sha256"]:
+        raise GatewayError("Reviewer evidence does not match the receipt's evidence digest.")
     if not isinstance(decision["decisions"], list) or not decision["decisions"]:
         raise GatewayError("Human decision must contain at least one decision.")
     known = {item["finding_id"] for item in evidence["items"]}
@@ -399,7 +402,14 @@ def validate_review(*, evidence_path: Path, receipt_path: Path, decision_path: P
         if item["decision"] not in ALLOWED_DECISIONS or not isinstance(item["rationale"], str) or not item["rationale"].strip():
             raise GatewayError("Human decision state or rationale is invalid.")
         decided.add(item["finding_id"])
-    return {"schema_version": "xero-review-decision-validation.v1", "run_id": receipt["run_id"], "status": "DECISION_RECORDED", "decision_count": len(decided), "limitation": "Validation records a structurally valid human decision; it does not approve, resolve, post, pay, lodge, or lock anything."}
+    return {
+        "schema_version": "xero-review-decision-validation.v1",
+        "run_id": receipt["run_id"],
+        "status": "DECISION_RECORDED",
+        "decision_count": len(decided),
+        "undecided_count": len(known) - len(decided),
+        "limitation": "Validation records a structurally valid human decision; it does not approve, resolve, post, pay, lodge, or lock anything.",
+    }
 
 
 def write_evaluation(model: dict[str, Any], evidence: dict[str, Any], receipt: dict[str, Any], output_dir: Path) -> dict[str, Path]:

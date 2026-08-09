@@ -37,7 +37,7 @@ The command writes three deterministic files below `build/demo`:
 
 - `model-result.json`: the only artefact a future AI adapter may receive. It has redacted account references and bounded values only.
 - `reviewer-evidence.json`: fabricated display evidence for a human reviewer. In a real system this would need its own access controls.
-- `receipt.json`: source, policy, request, and result hashes that make the run reproducible.
+- `receipt.json`: source, policy, request, result, and evidence hashes that make the run reproducible and let `validate-review` detect a tampered evidence file.
 
 The sole supported request is `trial_balance_variance` for an explicitly allowlisted section. It cannot select columns, change thresholds, use a natural-language prompt, choose a file path, or invoke an arbitrary Xero/MCP tool.
 
