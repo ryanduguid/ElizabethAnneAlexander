@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
 from .errors import GatewayError
 
 
-def repository_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+def package_root() -> Path:
+    """The installed package directory that carries the bundled policy/ and samples/ data."""
+    return Path(str(resources.files(__package__)))
+
+
+def build_root() -> Path:
+    """Run outputs are anchored below build/ in the invoking working directory."""
+    return Path.cwd() / "build"
 
 
 def sha256_bytes(value: bytes) -> str:

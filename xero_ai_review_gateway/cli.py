@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .errors import GatewayError
 from .gateway import evaluate, validate_review, write_evaluation
-from .util import path_within, repository_root
+from .util import build_root, path_within
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         validation = validate_review(evidence_path=args.evidence, receipt_path=args.receipt, decision_path=args.decision)
         if args.out:
-            out = path_within(args.out, repository_root() / "build", label="validation output", require_exists=False)
+            out = path_within(args.out, build_root(), label="validation output", require_exists=False)
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(json.dumps(validation, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(f"xero-ai-review-gateway: {validation['status']}; {validation['decision_count']} decision(s)")

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import GatewayError
-from .util import canonical_json, load_json_exact, path_within, repository_root, sha256_bytes, sha256_file
+from .util import build_root, canonical_json, load_json_exact, package_root, path_within, sha256_bytes, sha256_file
 
 
 CANONICAL_COLUMNS = (
@@ -51,6 +51,13 @@ def _non_empty(value: Any, *, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise GatewayError(f"{field} must be a non-empty string.")
     return value.strip()
+
+
+def _resolve_bundled(path: Path, subdir: str, *, label: str) -> Path:
+    """Resolve a bundled data path; relative paths are anchored at the package, not the CWD."""
+    root = package_root()
+    candidate = path if path.is_absolute() else root / path
+    return path_within(candidate, root / subdir, label=label)
 
 
 def _decimal(value: Any, *, field: str) -> Decimal:
@@ -131,7 +138,7 @@ def _load_manifest(path: Path) -> Source:
         raise GatewayError("report.as_at must be an ISO date.") from exc
     if export["schema"] != "xero-tb-csv.v1" or not isinstance(export["csv"], str) or not isinstance(export["sha256"], str):
         raise GatewayError("source manifest export schema, csv, or sha256 is invalid.")
-    root = repository_root()
+    root = package_root()
     csv_path = path_within(root / export["csv"], root / "samples", label="manifest CSV")
     actual_hash = sha256_file(csv_path)
     if actual_hash != export["sha256"].lower():
@@ -146,7 +153,7 @@ def _load_context(path: Path) -> tuple[Source, Source]:
     context = load_json_exact(path, {"schema_version", "mode", "current_manifest", "prior_manifest"}, label="review context")
     if context["schema_version"] != "xero-review-context.v1" or context["mode"] != "synthetic":
         raise GatewayError("Only xero-review-context.v1 in synthetic mode is supported.")
-    root = repository_root()
+    root = package_root()
     current_path = path_within(root / _non_empty(context["current_manifest"], field="current_manifest"), root / "samples", label="current manifest")
     prior_path = path_within(root / _non_empty(context["prior_manifest"], field="prior_manifest"), root / "samples", label="prior manifest")
     current, prior = _load_manifest(current_path), _load_manifest(prior_path)
@@ -200,10 +207,9 @@ def _decimal_string(value: Decimal) -> str:
 
 def evaluate(*, context_path: Path, request_path: Path, policy_path: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Evaluate the one fixed, read-only synthetic operation without network or ledger access."""
-    root = repository_root()
-    context_path = path_within(context_path, root / "samples", label="context")
-    request_path = path_within(request_path, root / "samples", label="request")
-    policy_path = path_within(policy_path, root / "policy", label="policy")
+    context_path = _resolve_bundled(context_path, "samples", label="context")
+    request_path = _resolve_bundled(request_path, "samples", label="request")
+    policy_path = _resolve_bundled(policy_path, "policy", label="policy")
     policy = _load_policy(policy_path)
     request = _load_request(request_path, policy)
     current, prior = _load_context(context_path)
@@ -299,10 +305,9 @@ def _assert_model_is_redacted(model: dict[str, Any], rows: tuple[BalanceRow, ...
 
 
 def validate_review(*, evidence_path: Path, receipt_path: Path, decision_path: Path) -> dict[str, Any]:
-    root = repository_root()
-    evidence_path = path_within(evidence_path, root / "build", label="reviewer evidence")
-    receipt_path = path_within(receipt_path, root / "build", label="receipt")
-    decision_path = path_within(decision_path, root / "samples", label="human decision")
+    evidence_path = path_within(evidence_path, build_root(), label="reviewer evidence")
+    receipt_path = path_within(receipt_path, build_root(), label="receipt")
+    decision_path = _resolve_bundled(decision_path, "samples", label="human decision")
     evidence = load_json_exact(evidence_path, {"schema_version", "run_id", "mode", "items"}, label="reviewer evidence")
     receipt = load_json_exact(receipt_path, {"schema_version", "run_id", "mode", "policy_sha256", "request_sha256", "source_digests", "result_sha256", "code_version"}, label="receipt")
     decision = load_json_exact(decision_path, {"schema_version", "run_id", "reviewer_ref", "reviewed_at", "decisions"}, label="human decision")
@@ -326,8 +331,7 @@ def validate_review(*, evidence_path: Path, receipt_path: Path, decision_path: P
 
 
 def write_evaluation(model: dict[str, Any], evidence: dict[str, Any], receipt: dict[str, Any], output_dir: Path) -> dict[str, Path]:
-    root = repository_root()
-    output_dir = path_within(output_dir, root / "build", label="output directory", require_exists=False)
+    output_dir = path_within(output_dir, build_root(), label="output directory", require_exists=False)
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = {"model": output_dir / "model-result.json", "evidence": output_dir / "reviewer-evidence.json", "receipt": output_dir / "receipt.json"}
     for key, payload in (("model", model), ("evidence", evidence), ("receipt", receipt)):
