@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from xero_ai_review_gateway.errors import GatewayError
-from xero_ai_review_gateway.gateway import MODEL_PROJECTION, BalanceRow, _assert_model_is_redacted, _load_tb, _variance_findings, evaluate, validate_review, write_evaluation
+from xero_ai_review_gateway.gateway import MODEL_PROJECTION, BalanceRow, _assert_model_is_redacted, _iso_timestamp, _load_tb, _variance_findings, evaluate, validate_review, write_evaluation
 from xero_ai_review_gateway.util import package_root
 
 PKG = Path(__file__).resolve().parents[1] / "xero_ai_review_gateway"
@@ -129,7 +129,7 @@ def test_partially_decided_findings_are_counted_as_undecided(tmp_path: Path, mon
     decision_path.write_text(json.dumps(decision, indent=2) + "\n", encoding="utf-8")
 
     result = validate_review(evidence_path=paths["evidence"], receipt_path=paths["receipt"], decision_path=decision_path)
-    assert result["status"] == "DECISION_RECORDED"
+    assert result["status"] == "PARTIAL_DECISION_RECORDED"
     assert result["decision_count"] == 1
     assert result["undecided_count"] == 1
 
@@ -238,6 +238,41 @@ def test_one_sided_account_outside_the_requested_section_is_not_reported() -> No
     findings = _variance_findings(current, prior, entity_ref="entity-1", section="Revenue", operation=OPERATION)
 
     assert findings == []
+
+
+def test_account_section_drift_fails_closed() -> None:
+    current = (_row("acct-1", section="Assets", ytd_credit="18000.00"),)
+    prior = (_row("acct-1", section="Revenue", ytd_credit="9000.00"),)
+
+    with pytest.raises(GatewayError, match="changed section"):
+        _variance_findings(current, prior, entity_ref="entity-1", section="Revenue", operation=OPERATION)
+
+
+def test_section_drift_outside_requested_section_does_not_block_review() -> None:
+    current = (
+        _row("acct-revenue", section="Revenue", ytd_credit="18000.00"),
+        _row("acct-unrelated", section="Liabilities", ytd_credit="7000.00"),
+    )
+    prior = (
+        _row("acct-revenue", section="Revenue", ytd_credit="18000.00"),
+        _row("acct-unrelated", section="Assets", ytd_credit="7000.00"),
+    )
+
+    findings = _variance_findings(
+        current,
+        prior,
+        entity_ref="entity-1",
+        section="Revenue",
+        operation=OPERATION,
+    )
+
+    assert findings == []
+
+
+@pytest.mark.parametrize("value", ["2026-08-09", "2026-08-09T00:00:00"])
+def test_review_timestamps_require_an_explicit_timezone(value: str) -> None:
+    with pytest.raises(GatewayError, match="explicit UTC offset"):
+        _iso_timestamp(value, field="reviewed_at")
 
 
 def test_unbalanced_source_fails_closed(tmp_path: Path) -> None:
