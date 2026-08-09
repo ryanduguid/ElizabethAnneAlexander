@@ -4,7 +4,7 @@ import csv
 import json
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,9 @@ from .util import build_root, canonical_json, load_json_exact, package_root, pat
 CANONICAL_COLUMNS = (
     "ReportDate", "Tenant", "Section", "AccountID", "AccountName", "AccountCode", "Debit", "Credit", "YTDDebit", "YTDCredit"
 )
+# The model-facing keys each finding carries. percent_change is expressed in
+# percent, quantized to four decimal places ("18.3333" means 18.3333%), and is
+# null when there is no prior balance to compare against.
 MODEL_PROJECTION = (
     "evidence_ref", "account_ref", "section", "current_ytd_net", "prior_ytd_net", "delta", "percent_change", "review_reason"
 )
@@ -220,6 +223,11 @@ def _decimal_string(value: Decimal) -> str:
     return format(value, "f")
 
 
+def _percent_string(ratio: Decimal) -> str:
+    """Express a change ratio as a percentage quantized to four decimal places."""
+    return _decimal_string((ratio * Decimal("100")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
+
+
 def evaluate(*, context_path: Path, request_path: Path, policy_path: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Evaluate the one fixed, read-only synthetic operation without network or ledger access."""
     context_path = _resolve_bundled(context_path, "samples", label="context")
@@ -255,7 +263,7 @@ def evaluate(*, context_path: Path, request_path: Path, policy_path: Path) -> tu
             "current_ytd_net": _decimal_string(current_row.ytd_net),
             "prior_ytd_net": _decimal_string(prior_row.ytd_net),
             "delta": _decimal_string(delta),
-            "percent_change": None if percent is None else _decimal_string(percent),
+            "percent_change": None if percent is None else _percent_string(percent),
             "review_reason": "Movement exceeds the approved variance thresholds.",
         }
         evidence_item = {

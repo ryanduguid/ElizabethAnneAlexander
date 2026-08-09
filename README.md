@@ -55,6 +55,7 @@ xero-ai-review-gateway validate-review \
 - The canonical source contract has exactly ten columns: `ReportDate,Tenant,Section,AccountID,AccountName,AccountCode,Debit,Credit,YTDDebit,YTDCredit`.
 - CSV schema, duplicate account IDs, reporting dates, balance pairs, source hashes, entity, basis, currency, tracking filters, and draft setting are all checked before review.
 - Monetary values use `Decimal`, never binary floating point.
+- `percent_change` in the model result is expressed in percent and quantized to four decimal places (`"18.3333"` means 18.3333%). It is `null` when there is no prior balance to compare against.
 - Current/prior trial balances are joined by stable `AccountID`, not account display name or code.
 - The model result never contains a tenant name, account name, account code, source file path, token, raw error, or free text copied from source data.
 - The package contains no network imports or mutation adapter. A future live connection must remain an authorised, read-only export handoff—not an AI-controlled broad Xero tool set.

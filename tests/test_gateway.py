@@ -32,6 +32,8 @@ def test_policy_bound_evaluation_returns_one_redacted_revenue_finding() -> None:
     assert model["status"] == "REVIEW_READY"
     assert len(model["findings"]) == 1
     assert model["findings"][0]["section"] == "Revenue"
+    # 11000 / 60000, expressed in percent and quantized to four decimal places.
+    assert model["findings"][0]["percent_change"] == "18.3333"
     model_text = json.dumps(model)
     assert "Demo Entity Pty Ltd" not in model_text
     assert "Demo Sales" not in model_text
