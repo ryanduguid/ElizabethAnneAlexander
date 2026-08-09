@@ -15,11 +15,13 @@ from .util import build_root, canonical_json, load_json_exact, package_root, pat
 CANONICAL_COLUMNS = (
     "ReportDate", "Tenant", "Section", "AccountID", "AccountName", "AccountCode", "Debit", "Credit", "YTDDebit", "YTDCredit"
 )
-# The model-facing keys each finding carries. percent_change is expressed in
-# percent, quantized to four decimal places ("18.3333" means 18.3333%), and is
-# null when there is no prior balance to compare against.
+# The model-facing keys each finding carries; emitted findings are built by
+# projecting through this tuple, so the declared contract cannot drift from
+# the emitted keys. percent_change is expressed in percent, quantized to four
+# decimal places ("18.3333" means 18.3333%), and is null when there is no
+# prior balance to compare against.
 MODEL_PROJECTION = (
-    "evidence_ref", "account_ref", "section", "current_ytd_net", "prior_ytd_net", "delta", "percent_change", "review_reason"
+    "finding_id", "evidence_ref", "account_ref", "section", "current_ytd_net", "prior_ytd_net", "delta", "percent_change", "review_reason"
 )
 ALLOWED_DECISIONS = {"ACKNOWLEDGED", "NEEDS_EVIDENCE", "ESCALATED"}
 
@@ -281,7 +283,7 @@ def _variance_findings(
         account_ref = "acct:" + sha256_bytes(f"{entity_ref}:{account_id}".encode("utf-8"))[:24]
         finding_id = "finding:" + sha256_bytes(f"{account_ref}:{delta}:{report_date}".encode("utf-8"))[:24]
         evidence_ref = "evidence:" + sha256_bytes(f"{finding_id}:reviewer-evidence".encode("utf-8"))[:24]
-        model_item = {
+        projected_values = {
             "finding_id": finding_id,
             "evidence_ref": evidence_ref,
             "account_ref": account_ref,
@@ -292,6 +294,7 @@ def _variance_findings(
             "percent_change": None if percent is None else _percent_string(percent),
             "review_reason": reason,
         }
+        model_item = {key: projected_values[key] for key in MODEL_PROJECTION}
         evidence_item = {
             "finding_id": finding_id,
             "account_id": account_id,

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from xero_ai_review_gateway.errors import GatewayError
-from xero_ai_review_gateway.gateway import BalanceRow, _assert_model_is_redacted, _load_tb, _variance_findings, evaluate, validate_review, write_evaluation
+from xero_ai_review_gateway.gateway import MODEL_PROJECTION, BalanceRow, _assert_model_is_redacted, _load_tb, _variance_findings, evaluate, validate_review, write_evaluation
 from xero_ai_review_gateway.util import package_root
 
 PKG = Path(__file__).resolve().parents[1] / "xero_ai_review_gateway"
@@ -162,6 +162,13 @@ def test_evaluation_output_outside_cwd_build_is_blocked(tmp_path: Path, monkeypa
 
     with pytest.raises(GatewayError, match="output directory must stay within"):
         write_evaluation(model, evidence, receipt, tmp_path / "elsewhere")
+
+
+def test_model_findings_carry_exactly_the_declared_projection() -> None:
+    model, _, _ = _evaluate()
+
+    for finding in model["findings"]:
+        assert tuple(finding) == MODEL_PROJECTION
 
 
 def test_account_present_only_in_the_current_period_is_reported() -> None:
