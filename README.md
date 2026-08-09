@@ -33,7 +33,7 @@ xero-ai-review-gateway evaluate \
   --out build/demo
 ```
 
-The command writes three deterministic files below `build/demo`:
+The command works from any directory: the relative `samples/` and `policy/` paths resolve against the data bundled inside the installed package, and outputs land below `build/` in the directory you run it from. It writes three deterministic files below `build/demo`:
 
 - `model-result.json`: the only artefact a future AI adapter may receive. It has redacted account references and bounded values only.
 - `reviewer-evidence.json`: fabricated display evidence for a human reviewer. In a real system this would need its own access controls.
@@ -72,3 +72,5 @@ python -m build
 ```
 
 MIT licensed.
+
+Built with AI assistance (Claude); design, review, and testing by the author.
