@@ -312,14 +312,16 @@ def evaluate(*, context_path: Path, request_path: Path, policy_path: Path) -> tu
     request = _load_request(request_path, policy)
     current, prior = _load_context(context_path)
     operation = policy["operations"]["trial_balance_variance"]
-    findings = _variance_findings(
+    all_findings = _variance_findings(
         current.rows,
         prior.rows,
         entity_ref=current.manifest["entity_ref"],
         section=request["section"],
         operation=operation,
     )
-    findings = findings[: operation["max_results"]]
+    total_findings = len(all_findings)
+    findings = all_findings[: operation["max_results"]]
+    truncated = total_findings > operation["max_results"]
     run_seed = {
         "context_sha256": sha256_file(context_path),
         "request_sha256": sha256_file(request_path),
@@ -335,6 +337,8 @@ def evaluate(*, context_path: Path, request_path: Path, policy_path: Path) -> tu
         "status": "REVIEW_READY",
         "operation": request["operation"],
         "findings": [item[0] for item in findings],
+        "total_findings": total_findings,
+        "truncated": truncated,
         "limitations": [
             "This is a synthetic-data review result.",
             "No journal, payment, filing, or period-locking action is available.",
@@ -346,6 +350,8 @@ def evaluate(*, context_path: Path, request_path: Path, policy_path: Path) -> tu
         "run_id": run_id,
         "mode": "synthetic",
         "items": [item[1] for item in findings],
+        "total_findings": total_findings,
+        "truncated": truncated,
     }
     receipt = {
         "schema_version": "xero-review-receipt.v1",
@@ -374,7 +380,7 @@ def validate_review(*, evidence_path: Path, receipt_path: Path, decision_path: P
     evidence_path = path_within(evidence_path, build_root(), label="reviewer evidence")
     receipt_path = path_within(receipt_path, build_root(), label="receipt")
     decision_path = _resolve_decision(decision_path)
-    evidence = load_json_exact(evidence_path, {"schema_version", "run_id", "mode", "items"}, label="reviewer evidence")
+    evidence = load_json_exact(evidence_path, {"schema_version", "run_id", "mode", "items", "total_findings", "truncated"}, label="reviewer evidence")
     receipt = load_json_exact(receipt_path, {"schema_version", "run_id", "mode", "policy_sha256", "request_sha256", "source_digests", "result_sha256", "code_version"}, label="receipt")
     decision = load_json_exact(decision_path, {"schema_version", "run_id", "reviewer_ref", "reviewed_at", "decisions"}, label="human decision")
     if evidence["schema_version"] != "xero-reviewer-evidence.v1" or receipt["schema_version"] != "xero-review-receipt.v1" or decision["schema_version"] != "xero-human-review-decision.v1":

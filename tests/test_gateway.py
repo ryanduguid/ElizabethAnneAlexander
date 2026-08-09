@@ -58,6 +58,8 @@ def test_policy_bound_evaluation_returns_one_redacted_revenue_finding() -> None:
     assert model["findings"][0]["section"] == "Revenue"
     # 11000 / 60000, expressed in percent and quantized to four decimal places.
     assert model["findings"][0]["percent_change"] == "18.3333"
+    assert model["total_findings"] == 1
+    assert model["truncated"] is False
     model_text = json.dumps(model)
     assert "Demo Entity Pty Ltd" not in model_text
     assert "Demo Sales" not in model_text
@@ -146,6 +148,29 @@ def test_account_present_only_in_the_prior_period_is_reported() -> None:
     assert evidence_item["current_values"] is None
     assert evidence_item["prior_values"] is not None
     assert evidence_item["source_refs"] == ["source:prior"]
+
+
+def test_findings_beyond_max_results_are_disclosed_not_silently_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    from xero_ai_review_gateway import gateway
+
+    real = gateway._variance_findings
+
+    def inflated(*args, **kwargs):
+        model_item, evidence_item = real(*args, **kwargs)[0]
+        return [
+            (dict(model_item, finding_id=f"finding:clone-{index:02d}"), dict(evidence_item, finding_id=f"finding:clone-{index:02d}"))
+            for index in range(27)
+        ]
+
+    monkeypatch.setattr(gateway, "_variance_findings", inflated)
+    model, evidence, _ = _evaluate()
+
+    assert model["total_findings"] == 27
+    assert model["truncated"] is True
+    assert len(model["findings"]) == 25
+    assert evidence["total_findings"] == 27
+    assert evidence["truncated"] is True
+    assert len(evidence["items"]) == 25
 
 
 def test_one_sided_account_outside_the_requested_section_is_not_reported() -> None:
