@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from xero_ai_review_gateway.errors import GatewayError
-from xero_ai_review_gateway.gateway import BalanceRow, _load_tb, _variance_findings, evaluate, validate_review, write_evaluation
+from xero_ai_review_gateway.gateway import BalanceRow, _assert_model_is_redacted, _load_tb, _variance_findings, evaluate, validate_review, write_evaluation
 from xero_ai_review_gateway.util import package_root
 
 PKG = Path(__file__).resolve().parents[1] / "xero_ai_review_gateway"
@@ -255,6 +255,23 @@ def test_unknown_section_is_denied_by_policy(tmp_path: Path) -> None:
     with pytest.raises(GatewayError, match="not allowlisted"):
         _load_request(bad, policy)
     assert model["mode"] == "synthetic"
+
+
+def test_numeric_account_id_inside_an_amount_is_not_a_disclosure() -> None:
+    # AccountID "100" occurs as a substring of the amount below; only an
+    # exact leaf match is a disclosure.
+    rows = (_row("100"),)
+    model = {"findings": [{"delta": "-11000.00"}]}
+
+    _assert_model_is_redacted(model, rows)
+
+
+def test_exact_account_id_leaf_still_trips_the_disclosure_check() -> None:
+    rows = (_row("100"),)
+    model = {"findings": [{"delta": "100"}]}
+
+    with pytest.raises(GatewayError, match="raw source display data"):
+        _assert_model_is_redacted(model, rows)
 
 
 def test_v01_source_does_not_import_a_network_client() -> None:

@@ -368,11 +368,25 @@ def evaluate(*, context_path: Path, request_path: Path, policy_path: Path) -> tu
     return model, evidence, receipt
 
 
+def _leaf_strings(value: Any) -> Any:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for child in value.values():
+            yield from _leaf_strings(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            yield from _leaf_strings(child)
+
+
 def _assert_model_is_redacted(model: dict[str, Any], rows: tuple[BalanceRow, ...]) -> None:
-    serialised = json.dumps(model, sort_keys=True)
+    # Compare each emitted leaf string for exact equality with a forbidden value;
+    # substring matching over the serialised model false-positives when an
+    # ordinary numeric AccountID happens to occur inside an amount or digest.
     forbidden = {row.tenant for row in rows} | {row.account_name for row in rows} | {row.account_id for row in rows}
-    if any(value in serialised for value in forbidden):
+    if any(leaf in forbidden for leaf in _leaf_strings(model)):
         raise GatewayError("Internal disclosure assertion failed: model result contains raw source display data.")
+    serialised = json.dumps(model, sort_keys=True)
     if '"account_code"' in serialised or '"account_name"' in serialised or '"tenant"' in serialised:
         raise GatewayError("Internal disclosure assertion failed: model result contains a prohibited source field.")
 
