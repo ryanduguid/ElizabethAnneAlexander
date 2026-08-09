@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     decision_parser = commands.add_parser("validate-review", help="validate a human acknowledgement/escalation record")
     decision_parser.add_argument("--evidence", required=True, type=Path)
     decision_parser.add_argument("--receipt", required=True, type=Path)
-    decision_parser.add_argument("--decision", required=True, type=Path)
+    decision_parser.add_argument("--decision", required=True, type=Path, help="decision JSON under the bundled samples/ data or the working directory's build/")
     decision_parser.add_argument("--out", type=Path, help="optional JSON validation output below build/")
     return parser
 

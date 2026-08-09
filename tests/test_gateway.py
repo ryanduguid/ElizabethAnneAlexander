@@ -55,6 +55,28 @@ def test_evaluation_writes_only_below_cwd_build_and_decision_can_be_validated(tm
     assert result["status"] == "DECISION_RECORDED"
 
 
+def test_decision_file_is_accepted_from_cwd_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    model, evidence, receipt = _evaluate()
+    paths = write_evaluation(model, evidence, receipt, Path("build") / "run")
+    local_decision = tmp_path / "build" / "run" / "decision.json"
+    local_decision.write_text((PKG / "samples" / "decisions" / "sample-review-decision.json").read_text(encoding="utf-8"), encoding="utf-8")
+
+    result = validate_review(evidence_path=paths["evidence"], receipt_path=paths["receipt"], decision_path=local_decision)
+    assert result["status"] == "DECISION_RECORDED"
+
+
+def test_decision_file_outside_samples_and_build_is_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    model, evidence, receipt = _evaluate()
+    paths = write_evaluation(model, evidence, receipt, Path("build") / "run")
+    stray = tmp_path / "decision.json"
+    stray.write_text((PKG / "samples" / "decisions" / "sample-review-decision.json").read_text(encoding="utf-8"), encoding="utf-8")
+
+    with pytest.raises(GatewayError, match="human decision must exist under"):
+        validate_review(evidence_path=paths["evidence"], receipt_path=paths["receipt"], decision_path=stray)
+
+
 def test_evaluation_output_outside_cwd_build_is_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     model, evidence, receipt = _evaluate()

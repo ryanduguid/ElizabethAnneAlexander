@@ -60,6 +60,21 @@ def _resolve_bundled(path: Path, subdir: str, *, label: str) -> Path:
     return path_within(candidate, root / subdir, label=label)
 
 
+def _resolve_decision(path: Path) -> Path:
+    """Human decisions may sit with the bundled samples or beside run outputs under CWD build/."""
+    bundled_candidate = path if path.is_absolute() else package_root() / path
+    attempts = (
+        (bundled_candidate, package_root() / "samples"),
+        (path, build_root()),
+    )
+    for candidate, parent in attempts:
+        try:
+            return path_within(candidate, parent, label="human decision")
+        except GatewayError:
+            continue
+    raise GatewayError(f"human decision must exist under the bundled samples/ data or the working directory's build/: {path}.")
+
+
 def _decimal(value: Any, *, field: str) -> Decimal:
     if not isinstance(value, str):
         raise GatewayError(f"{field} must be a decimal string.")
@@ -307,7 +322,7 @@ def _assert_model_is_redacted(model: dict[str, Any], rows: tuple[BalanceRow, ...
 def validate_review(*, evidence_path: Path, receipt_path: Path, decision_path: Path) -> dict[str, Any]:
     evidence_path = path_within(evidence_path, build_root(), label="reviewer evidence")
     receipt_path = path_within(receipt_path, build_root(), label="receipt")
-    decision_path = _resolve_bundled(decision_path, "samples", label="human decision")
+    decision_path = _resolve_decision(decision_path)
     evidence = load_json_exact(evidence_path, {"schema_version", "run_id", "mode", "items"}, label="reviewer evidence")
     receipt = load_json_exact(receipt_path, {"schema_version", "run_id", "mode", "policy_sha256", "request_sha256", "source_digests", "result_sha256", "code_version"}, label="receipt")
     decision = load_json_exact(decision_path, {"schema_version", "run_id", "reviewer_ref", "reviewed_at", "decisions"}, label="human decision")

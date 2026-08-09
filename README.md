@@ -45,10 +45,10 @@ The sole supported request is `trial_balance_variance` for an explicitly allowli
 xero-ai-review-gateway validate-review \
   --evidence build/demo/reviewer-evidence.json \
   --receipt build/demo/receipt.json \
-  --decision path/to/a-human-decision.json
+  --decision samples/decisions/sample-review-decision.json
 ```
 
-The decision validator accepts only `ACKNOWLEDGED`, `NEEDS_EVIDENCE`, or `ESCALATED`. It records no accounting action and rejects `APPROVED`, `RESOLVED`, `POSTED`, `PAID`, `LODGED`, and `LOCKED`.
+`--decision` accepts a file from the bundled `samples/` data or from `build/` under the working directory, so a real decision can sit next to the run outputs it refers to. The decision validator accepts only `ACKNOWLEDGED`, `NEEDS_EVIDENCE`, or `ESCALATED`. It records no accounting action and rejects `APPROVED`, `RESOLVED`, `POSTED`, `PAID`, `LODGED`, and `LOCKED`.
 
 ## Control boundary
 
