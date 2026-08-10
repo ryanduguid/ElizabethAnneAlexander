@@ -26,8 +26,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _survive_a_narrow_stream(stream: object) -> None:
+    """Keep a path that the output encoding cannot represent from killing a finished run.
+
+    Redirected stdout on Windows defaults to the ANSI code page, so a working
+    directory holding one character outside it made the gateway exit 1 after
+    the artefacts had already been written correctly.
+    """
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is None:
+        return
+    try:
+        reconfigure(errors="backslashreplace")
+    except (OSError, ValueError):
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    for stream in (sys.stdout, sys.stderr):
+        _survive_a_narrow_stream(stream)
     try:
         if args.command == "evaluate":
             model, evidence, receipt = evaluate(context_path=args.context, request_path=args.request, policy_path=args.policy)
@@ -39,8 +57,11 @@ def main(argv: list[str] | None = None) -> int:
         validation = validate_review(evidence_path=args.evidence, receipt_path=args.receipt, decision_path=args.decision)
         if args.out:
             out = path_within(args.out, build_root(), label="validation output", require_exists=False)
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(json.dumps(validation, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            try:
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(json.dumps(validation, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            except OSError as exc:
+                raise GatewayError(f"validation output cannot be written to {out}: {exc}.") from exc
         print(f"xero-ai-review-gateway: {validation['status']}; {validation['decision_count']} decision(s); {validation['undecided_count']} undecided finding(s)")
         return 0
     except GatewayError as exc:

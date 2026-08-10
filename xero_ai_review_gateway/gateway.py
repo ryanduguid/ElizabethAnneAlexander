@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -24,6 +26,16 @@ MODEL_PROJECTION = (
     "finding_id", "evidence_ref", "account_ref", "section", "current_ytd_net", "prior_ytd_net", "delta", "percent_change", "review_reason"
 )
 ALLOWED_DECISIONS = {"ACKNOWLEDGED", "NEEDS_EVIDENCE", "ESCALATED"}
+# The model result carries a debit-positive net, so a revenue or liability
+# balance is negative. Stating that on the artefact keeps a reader of the
+# model result alone from reading a revenue increase as a fall.
+SIGN_CONVENTION = "debit_positive: ytd_net = YTDDebit - YTDCredit, so revenue, liability, and equity balances are negative"
+# datetime.fromisoformat accepts a wider grammar on 3.11+ than on 3.10, so the
+# set of artefacts the gateway accepts would otherwise depend on the
+# interpreter. Define the accepted grammar here instead: a full date, T, a
+# full time with optional fractional seconds, then Z/z or an explicit offset.
+_TIMESTAMP = re.compile(r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?(Z|z|[+-]\d{2}:\d{2})")
+_TIMESTAMP_WITHOUT_OFFSET = re.compile(r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)?")
 
 
 @dataclass(frozen=True)
@@ -63,7 +75,17 @@ def _non_empty(value: Any, *, field: str) -> str:
 
 def _iso_timestamp(value: Any, *, field: str) -> str:
     text = _non_empty(value, field=field)
-    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    match = _TIMESTAMP.fullmatch(text)
+    if match is None:
+        if _TIMESTAMP_WITHOUT_OFFSET.fullmatch(text):
+            raise GatewayError(f"{field} must include an explicit UTC offset or Z.")
+        raise GatewayError(f"{field} must be an ISO 8601 timestamp.")
+    day, clock, fraction, offset = match.groups()
+    # Pad the fraction to microseconds and expand Z/z, so every accepted form
+    # is handed to fromisoformat in the one shape that parses identically on
+    # every supported interpreter. fromisoformat still rejects an impossible
+    # date, time, or offset.
+    normalized = f"{day}T{clock}.{(fraction or '0').ljust(6, '0')}" + ("+00:00" if offset in {"Z", "z"} else offset)
     try:
         parsed = datetime.fromisoformat(normalized)
     except ValueError as exc:
@@ -187,6 +209,11 @@ def _load_manifest(path: Path) -> Source:
     return Source(manifest_path=path, manifest=manifest, csv_path=csv_path, rows=rows)
 
 
+def _au_financial_year(value: date) -> int:
+    """The Australian financial year ending 30 June that contains value (1 Jul 2026 falls in FY2027)."""
+    return value.year + 1 if value.month >= 7 else value.year
+
+
 def _load_context(path: Path) -> tuple[Source, Source]:
     context = load_json_exact(path, {"schema_version", "mode", "current_manifest", "prior_manifest"}, label="review context")
     if context["schema_version"] != "xero-review-context.v1" or context["mode"] != "synthetic":
@@ -201,8 +228,18 @@ def _load_context(path: Path) -> tuple[Source, Source]:
             raise GatewayError(f"Current/prior source context mismatch for {field}.")
     if current.manifest["entity_ref"] != prior.manifest["entity_ref"]:
         raise GatewayError("Current/prior source context has different entity_ref values.")
-    if prior.rows[0].report_date >= current.rows[0].report_date:
+    current_date, prior_date = current.rows[0].report_date, prior.rows[0].report_date
+    if prior_date >= current_date:
         raise GatewayError("Prior report date must be earlier than the current report date.")
+    # YTD columns reset on 1 July, so a comparison that straddles the reset
+    # reports the whole prior-year balance as a movement. Two dates are
+    # comparable within one financial year, or as the same day and month one
+    # or more years apart, which is the year-on-year comparison.
+    same_day_and_month = (current_date.month, current_date.day) == (prior_date.month, prior_date.day)
+    if _au_financial_year(current_date) != _au_financial_year(prior_date) and not same_day_and_month:
+        raise GatewayError(
+            "Current and prior reports fall in different financial years; YTD balances reset on 1 July and are not comparable."
+        )
     return current, prior
 
 
@@ -371,6 +408,8 @@ def evaluate(*, context_path: Path, request_path: Path, policy_path: Path) -> tu
         "mode": "synthetic",
         "status": "REVIEW_READY",
         "operation": request["operation"],
+        "currency": current.manifest["report"]["currency"],
+        "sign_convention": SIGN_CONVENTION,
         "findings": [item[0] for item in findings],
         "total_findings": total_findings,
         "truncated": truncated,
@@ -488,10 +527,33 @@ def validate_review(*, evidence_path: Path, receipt_path: Path, decision_path: P
     }
 
 
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def write_evaluation(model: dict[str, Any], evidence: dict[str, Any], receipt: dict[str, Any], output_dir: Path) -> dict[str, Path]:
+    """Stage all three artefacts, then move them into place.
+
+    The three files describe one run. Writing them straight into the output
+    directory means an interrupted second run can leave a new model-result.json
+    beside the previous run's evidence and receipt, which still agree with each
+    other and so validate cleanly. Every file is written under a temporary name
+    first and only replaced once all three exist.
+    """
     output_dir = path_within(output_dir, build_root(), label="output directory", require_exists=False)
-    output_dir.mkdir(parents=True, exist_ok=True)
     paths = {"model": output_dir / "model-result.json", "evidence": output_dir / "reviewer-evidence.json", "receipt": output_dir / "receipt.json"}
-    for key, payload in (("model", model), ("evidence", evidence), ("receipt", receipt)):
-        paths[key].write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    staged = {key: path.with_name(path.name + ".partial") for key, path in paths.items()}
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for key, payload in (("model", model), ("evidence", evidence), ("receipt", receipt)):
+            _write_json(staged[key], payload)
+        for key, path in paths.items():
+            os.replace(staged[key], path)
+    except OSError as exc:
+        for temporary in staged.values():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+        raise GatewayError(f"run output cannot be written to {output_dir}: {exc}.") from exc
     return paths

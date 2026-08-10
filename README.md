@@ -56,6 +56,8 @@ xero-ai-review-gateway validate-review \
 - CSV schema, duplicate account IDs, reporting dates, balance pairs, source hashes, entity, basis, currency, tracking filters, and draft setting are all checked before review.
 - Monetary values use `Decimal`, never binary floating point.
 - `percent_change` in the model result is expressed in percent and quantized to four decimal places (`"18.3333"` means 18.3333%). It is `null` when there is no prior balance to compare against.
+- The model result states its own `currency` and `sign_convention`. Amounts are debit-positive (`ytd_net = YTDDebit - YTDCredit`), so a revenue, liability, or equity balance is negative and a revenue increase shows as a negative `delta`.
+- Current and prior reports must sit in the same Australian financial year, or be the same day and month in different years. YTD columns reset on 1 July, so a comparison across the reset would report a whole prior-year balance as a movement.
 - Current/prior trial balances are joined by stable `AccountID`, not account display name or code.
 - An account changing section between periods fails closed instead of disappearing from, or being silently reclassified within, a section-scoped comparison.
 - The model result never contains a tenant name, account name, account code, source file path, token, raw error, or free text copied from source data.
@@ -63,7 +65,7 @@ xero-ai-review-gateway validate-review \
 
 ## Scope and limitation
 
-Every supplied artefact is marked `mode: synthetic`. It is a local design demonstration, not a client-data processor, production security system, accounting service, or professional opinion. The reviewer evidence/model-result file split demonstrates disclosure minimisation only; it is not an access-control mechanism by itself.
+Every source manifest, review context, and emitted result artefact is marked `mode: synthetic`. The policy, request, and human-decision files carry no `mode` key: each is validated against an exact key set, so adding one is rejected. It is a local design demonstration, not a client-data processor, production security system, accounting service, or professional opinion. The reviewer evidence/model-result file split demonstrates disclosure minimisation only; it is not an access-control mechanism by itself.
 
 ## Development
 
