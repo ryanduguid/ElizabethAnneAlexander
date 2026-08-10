@@ -35,7 +35,8 @@ def canonical_json(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
 
-def load_json_exact(path: Path, required: set[str], *, label: str) -> dict[str, Any]:
+def load_json_object(path: Path, *, label: str) -> dict[str, Any]:
+    """Read a JSON object whose key set is not fixed by this gateway."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -46,7 +47,14 @@ def load_json_exact(path: Path, required: set[str], *, label: str) -> dict[str, 
         raise GatewayError(f"{label} cannot be read: {path}.") from exc
     except json.JSONDecodeError as exc:
         raise GatewayError(f"{label} is not valid JSON: {path}.") from exc
-    if not isinstance(raw, dict) or set(raw) != required:
+    if not isinstance(raw, dict):
+        raise GatewayError(f"{label} must be a JSON object: {path}.")
+    return raw
+
+
+def load_json_exact(path: Path, required: set[str], *, label: str) -> dict[str, Any]:
+    raw = load_json_object(path, label=label)
+    if set(raw) != required:
         raise GatewayError(f"{label} must contain exactly: {', '.join(sorted(required))}.")
     return raw
 

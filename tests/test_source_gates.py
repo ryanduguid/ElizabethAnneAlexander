@@ -264,8 +264,11 @@ def test_policy_model_projection_must_match_the_code_contract(tmp_path: Path, mu
         _load_policy(path)
 
 
-@pytest.mark.parametrize("value", [0, 101, -1, "25", 2.5])
+@pytest.mark.parametrize("value", [0, 101, -1, "25", 2.5, True, False])
 def test_policy_max_results_outside_one_to_one_hundred_is_refused(tmp_path: Path, value: object) -> None:
+    # JSON true is the case an isinstance(..., int) bound lets through: bool is
+    # a subclass of int and 1 <= True <= 100 holds, so the policy would load
+    # and silently cap every run at one finding.
     policy = _read(PKG / "policy" / "demo-policy-v1.json")
     policy["operations"]["trial_balance_variance"]["max_results"] = value
     path = tmp_path / "policy.json"

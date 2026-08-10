@@ -5,7 +5,19 @@ from pathlib import Path
 import pytest
 
 from xero_ai_review_gateway.errors import GatewayError
-from xero_ai_review_gateway.util import load_json_exact, path_within
+from xero_ai_review_gateway.util import load_json_exact, load_json_object, path_within
+
+
+@pytest.mark.parametrize("payload", ["[]", '"text"', "3"])
+def test_json_that_is_not_an_object_is_blocked_not_a_traceback(tmp_path: Path, payload: str) -> None:
+    # load_json_object reads an artefact whose key set this gateway does not
+    # fix, so the object check is the only shape check it can make.
+    bad = tmp_path / "bad.json"
+    bad.write_text(payload, encoding="utf-8")
+
+    for loader in (lambda: load_json_object(bad, label="test artefact"), lambda: load_json_exact(bad, set(), label="test artefact")):
+        with pytest.raises(GatewayError, match="must be a JSON object"):
+            loader()
 
 
 def test_non_utf8_json_is_blocked_not_a_traceback(tmp_path: Path) -> None:

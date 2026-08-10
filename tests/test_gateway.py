@@ -398,7 +398,7 @@ def test_section_drift_outside_requested_section_does_not_block_review() -> None
     assert findings == []
 
 
-@pytest.mark.parametrize("value", ["2026-08-09", "2026-08-09T00:00:00"])
+@pytest.mark.parametrize("value", ["2026-08-09", "2026-08-09T00:00:00", "2026-08-09 00:00:00", "2026-08-09T00:00"])
 def test_review_timestamps_require_an_explicit_timezone(value: str) -> None:
     with pytest.raises(GatewayError, match="explicit UTC offset"):
         _iso_timestamp(value, field="reviewed_at")
@@ -596,6 +596,13 @@ def test_model_result_states_its_currency_and_sign_convention() -> None:
         "2026-08-09T00:00:00.123+00:00",
         "2026-08-09T00:00:00.123456+00:00",
         "2026-08-09T00:00:00.1+00:00",
+        # datetime.fromisoformat accepted each of the four below on 3.10, 3.12
+        # and 3.13 alike, so an already stored artefact may use any of them.
+        # Pinning the grammar must not refuse a form that used to work.
+        "2026-08-09 00:00:00+00:00",
+        "2026-08-09t00:00:00+00:00",
+        "2026-08-09T00:00+00:00",
+        "2026-08-09T00:00:00+10:00:30",
     ],
 )
 def test_accepted_timestamp_forms_do_not_depend_on_the_interpreter(value: str) -> None:
@@ -607,16 +614,28 @@ def test_accepted_timestamp_forms_do_not_depend_on_the_interpreter(value: str) -
     [
         "2026-08-09T00:00:00+10",  # datetime.fromisoformat accepts this on 3.11+ only
         "20260809T000000+0000",
-        "2026-08-09T00:00:00.123456789+00:00",
-        "2026-08-09 00:00:00+00:00",
-        "2026-08-09T00:00+00:00",
         "2026-W32-7T00:00:00+00:00",
+        "2026-08-09T00:00:00.123456789+00:00",
+        # A separator that is neither T/t nor a space: refused on every
+        # interpreter, and named as refused in the README grammar.
+        "2026-08-09X00:00:00+00:00",
         "2026-08-09T00:00:00Z extra",
     ],
 )
 def test_rejected_timestamp_forms_do_not_depend_on_the_interpreter(value: str) -> None:
     with pytest.raises(GatewayError, match="must be an ISO 8601 timestamp"):
         _iso_timestamp(value, field="reviewed_at")
+
+
+def test_the_readme_states_the_timestamp_grammar_the_gateway_enforces() -> None:
+    """The accepted grammar is a contract for artefact authors, so it is written down."""
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    grammar = next(line for line in readme.splitlines() if line.startswith("- Artefact timestamps"))
+
+    for documented in ("`T`, `t`, or a space", "`Z`, `z`, or `+/-HH:MM` with optional `:SS`"):
+        assert documented in grammar
+    for refused in ("+10", "week date", "20260809T000000+0000"):
+        assert refused in grammar
 
 
 def test_an_interrupted_rerun_leaves_the_previous_run_intact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -650,6 +669,82 @@ def test_an_interrupted_rerun_leaves_the_previous_run_intact(tmp_path: Path, mon
         "receipt.json",
         "reviewer-evidence.json",
     ]
+
+
+def test_a_pack_mixed_by_a_failed_move_is_refused_by_validate_review(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Three moves are not one atomic step, so the mixed pack has to fail closed at validation.
+
+    The staged writes all succeed here and the failure lands between the moves,
+    which leaves the second run's model result beside the first run's evidence
+    and receipt. Those two still agree with each other, so only the receipt's
+    result digest can tell that the pack describes two runs.
+    """
+    from xero_ai_review_gateway import gateway
+
+    monkeypatch.chdir(tmp_path)
+    model, evidence, receipt = _evaluate()
+    output_dir = Path("build") / "run"
+    paths = write_evaluation(model, evidence, receipt, output_dir)
+    real_replace = gateway._replace
+    moved: list[Path] = []
+
+    def failing(source: Path, destination: Path) -> None:
+        moved.append(destination)
+        if len(moved) == 2:
+            raise OSError(13, "Permission denied")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(gateway, "_replace", failing)
+    second_run = dict(model, run_id="sha256:a-different-run")
+
+    with pytest.raises(GatewayError, match="run output cannot be written"):
+        write_evaluation(second_run, evidence, receipt, output_dir)
+
+    assert json.loads(paths["model"].read_text(encoding="utf-8"))["run_id"] == "sha256:a-different-run"
+    assert json.loads(paths["receipt"].read_text(encoding="utf-8"))["run_id"] == receipt["run_id"]
+    with pytest.raises(GatewayError, match="does not match the receipt's result digest"):
+        validate_review(
+            evidence_path=paths["evidence"],
+            receipt_path=paths["receipt"],
+            decision_path=Path("samples/decisions/sample-review-decision.json"),
+        )
+
+
+def test_a_reviewer_holding_only_the_evidence_and_receipt_can_still_validate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The evidence/model split is the point, so the model result is checked when present, not required."""
+    monkeypatch.chdir(tmp_path)
+    model, evidence, receipt = _evaluate()
+    paths = write_evaluation(model, evidence, receipt, Path("build") / "run")
+    paths["model"].unlink()
+
+    result = validate_review(
+        evidence_path=paths["evidence"],
+        receipt_path=paths["receipt"],
+        decision_path=Path("samples/decisions/sample-review-decision.json"),
+    )
+
+    assert result["status"] == "DECISION_RECORDED"
+
+
+def test_the_scope_note_names_exactly_the_artefacts_that_carry_the_mode_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    model, evidence, receipt = _evaluate()
+    paths = write_evaluation(model, evidence, receipt, Path("build") / "run")
+    validation = validate_review(
+        evidence_path=paths["evidence"],
+        receipt_path=paths["receipt"],
+        decision_path=Path("samples/decisions/sample-review-decision.json"),
+    )
+    context = json.loads((PKG / "samples" / "contexts" / "sample-monthly-variance.context.json").read_text(encoding="utf-8"))
+    manifest = json.loads((PKG / "samples" / "manifests" / "sample-tb-2026-06-30.manifest.json").read_text(encoding="utf-8"))
+
+    assert {artefact["mode"] for artefact in (manifest, context, model, evidence, receipt)} == {"synthetic"}
+    # The validation output is emitted too, and it carries no mode key, so the
+    # README cannot claim the marker for every emitted artefact.
+    assert "mode" not in validation
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    assert "Every source manifest, review context, model result, reviewer evidence, and receipt is marked `mode: synthetic`." in readme
+    assert "The `validate-review` output carries no `mode` key either" in readme
 
 
 def test_output_directory_occupied_by_a_file_is_blocked_not_a_traceback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
