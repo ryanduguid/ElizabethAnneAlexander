@@ -272,13 +272,20 @@ def _variance_findings(
     minimum_percent = _decimal(operation["minimum_percent_delta"], field="minimum_percent_delta") / Decimal("100")
     current_by_id = {row.account_id: row for row in current_rows}
     prior_by_id = {row.account_id: row for row in prior_rows}
-    for account_id in set(current_by_id) & set(prior_by_id):
-        current_section = current_by_id[account_id].section
-        prior_section = prior_by_id[account_id].section
-        if current_section != prior_section and section in {current_section, prior_section}:
-            raise GatewayError(
-                f"Account {account_id!r} changed section between periods; review the source mapping before comparison."
-            )
+    # Sorted and reported in full: iterating the unordered set intersection
+    # named an arbitrary one of several drifting accounts, so the same inputs
+    # produced a different message run to run.
+    drifted = sorted(
+        account_id
+        for account_id in set(current_by_id) & set(prior_by_id)
+        if current_by_id[account_id].section != prior_by_id[account_id].section
+        and section in {current_by_id[account_id].section, prior_by_id[account_id].section}
+    )
+    if drifted:
+        listed = ", ".join(repr(account_id) for account_id in drifted)
+        raise GatewayError(
+            f"Accounts changed section between periods ({listed}); review the source mapping before comparison."
+        )
     report_date = current_rows[0].report_date
     findings: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for account_id in sorted(set(current_by_id) | set(prior_by_id)):
@@ -463,12 +470,20 @@ def validate_review(*, evidence_path: Path, receipt_path: Path, decision_path: P
         _non_empty(item["rationale"], field="human decision rationale")
         decided.add(finding_id)
     undecided_count = total_findings - len(decided)
+    # A decision can only name a finding the evidence actually carries, so a
+    # run whose findings were capped can never reach DECISION_RECORDED. That
+    # is deliberate - silence about an omitted finding is not a decision about
+    # it - but the caller has to be able to tell "still being reviewed" from
+    # "cannot be completed at this max_results".
     return {
         "schema_version": "xero-review-decision-validation.v1",
         "run_id": receipt["run_id"],
         "status": "DECISION_RECORDED" if undecided_count == 0 else "PARTIAL_DECISION_RECORDED",
         "decision_count": len(decided),
         "undecided_count": undecided_count,
+        "visible_findings": len(items),
+        "truncated": evidence["truncated"],
+        "completable": not evidence["truncated"],
         "limitation": "Validation records a structurally valid human decision; it does not approve, resolve, post, pay, lodge, or lock anything.",
     }
 

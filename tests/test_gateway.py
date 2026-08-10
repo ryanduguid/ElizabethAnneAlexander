@@ -132,6 +132,61 @@ def test_partially_decided_findings_are_counted_as_undecided(tmp_path: Path, mon
     assert result["status"] == "PARTIAL_DECISION_RECORDED"
     assert result["decision_count"] == 1
     assert result["undecided_count"] == 1
+    # Nothing was capped here, so a second decision would complete the review.
+    assert result["truncated"] is False
+    assert result["completable"] is True
+
+
+def test_a_truncated_run_reports_that_it_cannot_be_completed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A decision can only name a visible finding.
+
+    Findings dropped by max_results can never be decided, so the run stays
+    PARTIAL_DECISION_RECORDED however many decisions are recorded. The result
+    has to say so rather than looking like a review still in progress.
+    """
+    from xero_ai_review_gateway import gateway
+
+    real = gateway._variance_findings
+
+    def over_the_cap(*args, **kwargs):
+        model_item, evidence_item = real(*args, **kwargs)[0]
+        # The bundled policy caps results at 25.
+        return [
+            (dict(model_item, finding_id=f"finding:clone-{index}"), dict(evidence_item, finding_id=f"finding:clone-{index}"))
+            for index in range(30)
+        ]
+
+    monkeypatch.setattr(gateway, "_variance_findings", over_the_cap)
+    monkeypatch.chdir(tmp_path)
+    model, evidence, receipt = _evaluate()
+    paths = write_evaluation(model, evidence, receipt, Path("build") / "run")
+    assert evidence["truncated"] is True
+
+    decision = {
+        "schema_version": "xero-human-review-decision.v1",
+        "run_id": receipt["run_id"],
+        "reviewer_ref": "unit-test-reviewer",
+        "reviewed_at": "2026-08-09T00:00:00Z",
+        "decisions": [
+            {
+                "finding_id": evidence["items"][0]["finding_id"],
+                "decision": "ACKNOWLEDGED",
+                "rationale": "Only visible finding reviewed.",
+            }
+        ],
+    }
+    decision_path = tmp_path / "build" / "run" / "decision.json"
+    decision_path.write_text(json.dumps(decision, indent=2) + "\n", encoding="utf-8")
+
+    result = validate_review(evidence_path=paths["evidence"], receipt_path=paths["receipt"], decision_path=decision_path)
+
+    assert result["status"] == "PARTIAL_DECISION_RECORDED"
+    assert result["visible_findings"] == 25
+    assert result["undecided_count"] == 29
+    assert result["truncated"] is True
+    assert result["completable"] is False
 
 
 def test_decision_file_is_accepted_from_cwd_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -246,6 +301,28 @@ def test_account_section_drift_fails_closed() -> None:
 
     with pytest.raises(GatewayError, match="changed section"):
         _variance_findings(current, prior, entity_ref="entity-1", section="Revenue", operation=OPERATION)
+
+
+def test_section_drift_message_is_deterministic_and_names_every_account() -> None:
+    """Iterating the raw set intersection named an arbitrary one of several."""
+    current = tuple(
+        _row(f"acct-{n}", section="Assets", ytd_credit="18000.00") for n in ("c", "a", "b")
+    )
+    prior = tuple(
+        _row(f"acct-{n}", section="Revenue", ytd_credit="9000.00") for n in ("c", "a", "b")
+    )
+
+    messages = set()
+    for _ in range(8):
+        with pytest.raises(GatewayError) as caught:
+            _variance_findings(
+                current, prior, entity_ref="entity-1", section="Revenue", operation=OPERATION
+            )
+        messages.add(str(caught.value))
+
+    assert len(messages) == 1
+    message = messages.pop()
+    assert "'acct-a', 'acct-b', 'acct-c'" in message
 
 
 def test_section_drift_outside_requested_section_does_not_block_review() -> None:
