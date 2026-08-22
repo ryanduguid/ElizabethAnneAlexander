@@ -1,13 +1,13 @@
 # Elizabeth Anne Alexander
 
-[![tests](https://github.com/ryanduguid/ElizabethAnneAlexander/actions/workflows/ci.yml/badge.svg)](https://github.com/ryanduguid/ElizabethAnneAlexander/actions/workflows/ci.yml)
+[![tests](https://github.com/ryanduguid/xero-ai-review-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/ryanduguid/xero-ai-review-gateway/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-5C2D91.svg?logo=python&logoColor=white&labelColor=04001F)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-4F485E.svg?labelColor=04001F)](LICENSE)
 [![Zero-Network Safe](https://img.shields.io/badge/Network-Air--Gapped%20Local-5C2D91.svg?labelColor=04001F)](DATA-FLOW.md)
 
 A **fixed-policy, zero-network ledger-review boundary for AI**, not an AI that operates Xero.
 
-`ElizabethAnneAlexander` consumes validated Xero-shaped trial-balance exports and produces a bounded, redacted variance-review result alongside separate local human-reviewer evidence. It deliberately features **no network calls, no cloud telemetry, no LLM API clients, and zero accounting-system write operations**.
+`xero-ai-review-gateway` consumes validated Xero-shaped trial-balance exports and produces a bounded, redacted variance-review result alongside separate local human-reviewer evidence. It deliberately features **no network calls, no cloud telemetry, no LLM API clients, and zero accounting-system write operations**.
 
 ---
 
@@ -95,4 +95,3 @@ Named in honour of [Elizabeth Anne Alexander AO](https://fbe.unimelb.edu.au/cent
 - [`DATA-FLOW.md`](./DATA-FLOW.md) – Formal data-flow and zero-network security specification.
 - [`CITATION.cff`](./CITATION.cff) – Academic and industry citation metadata.
 - [`LICENSE`](./LICENSE) – MIT License.
-
